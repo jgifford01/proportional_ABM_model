@@ -13,7 +13,8 @@ import pandas as pd
 
 class TradingModel(Model):
     def __init__(self, N, aw, alphaw, betaw, cbar0, gamma, P, stream_complexity,
-                 upstream_selling, smart_market_ind, bilateral_market_ind, CPP_ind, random_seed, non_pec_prefs_ind, GFT = 0):
+                 upstream_selling, smart_market_ind, bilateral_market_ind, CPP_ind, 
+                 random_seed, non_pec_prefs_ind, GFT = 0, allocation_rule = "priority"):
         super().__init__()
         self.N = N
         self.aw = aw
@@ -30,8 +31,10 @@ class TradingModel(Model):
         self.GFT = GFT
         self.non_pec_prefs_ind = non_pec_prefs_ind
         self.random_seed = random_seed
+        self.allocation_rule = allocation_rule
         self.create_agents()
         self.initialize_model()
+        
         
     
     def create_agents(self):      
@@ -52,8 +55,19 @@ class TradingModel(Model):
         
         for agent in self.schedule.agents:
             agent.sigma = sigma_array[agent.unique_id - 1]
-            agent.pro = 1 if agent.sigma <= self.P else 0    # decides if junior or senior
-            agent.c = agent.cbar*agent.pro
+
+
+            if self.allocation_rule == "priority":
+                # your existing shutoff rule: seniors get full, juniors get 0
+                agent.pro = 1 if agent.sigma <= self.P else 0
+                agent.c = agent.cbar * agent.pro
+
+            elif self.allocation_rule == "proportional":
+                # prorationing: everyone gets the same fraction of their claim
+                # interpret P as the available fraction of full supply
+                agent.pro = 1  # keep defined; not used for market role
+                agent.c = self.P * agent.cbar
+
             
             # add non-pecuniary preferences if non_pec_prefs_ind is True
             if self.non_pec_prefs_ind == 2: #     0 => pmax, 1 => Uniform Random, 2 => Seniors prefer farming
@@ -145,7 +159,7 @@ class TradingModel(Model):
 
 
         # create cumulative water value data pretrade #
-        if self.smart_market_ind == True:
+        if self.smart_market_ind == True and self.allocation_rule != "proportional":
                 TV0 = np.sum([agent.c * (agent.alpha - agent.beta * agent.c) for agent in self.schedule.agents])
                 # Open the CSV file in append mode
                 with open(f"data/{self.N}agents_seed{self.random_seed}/watervalue.csv", mode='a', newline='') as file:
@@ -158,10 +172,24 @@ class TradingModel(Model):
                     # Write the P and TV0 values to the CSV file
                     writer.writerow([self.P, TV0])
         
+        # create cumulative water value data pretrade for proportional allocation rule
+        if self.smart_market_ind == True and self.allocation_rule == "proportional":
+                TV0 = np.sum([agent.c * (agent.alpha - agent.beta * agent.c) for agent in self.schedule.agents])
+                # Open the CSV file in append mode
+                with open(f"data/{self.N}agents_seed{self.random_seed}/watervalue_SM_proportional.csv", mode='a', newline='') as file:
+                    writer = csv.writer(file)
+                    
+                    # Check if the file is empty to write headers only once
+                    if file.tell() == 0:  # If the file is empty, write the headers
+                        writer.writerow(['P', 'TV0'])
+                    
+                    # Write the P and TV0 values to the CSV file
+                    writer.writerow([self.P, TV0])
+        
         
 
-        # End trading if buyer or seller list is empty
-        if not self.catalog_of_buyers or not self.catalog_of_sellers:
+        # End trading if buyer or seller list is empty and not proportional allocation
+        if (not self.catalog_of_buyers or not self.catalog_of_sellers) and self.allocation_rule != "proportional":
             self.GFT = 0
             return
 
@@ -172,47 +200,101 @@ class TradingModel(Model):
 
         # initial price collection array P by N
         price_collection_array = []
+        
+        if self.allocation_rule == "priority":
+        # priority based allocation trade sequence
+            for j in range(len(self.catalog_of_buyers)):
+                buyer = self.catalog_of_buyers[j]
+                for s in range(len(self.catalog_of_sellers)):
+                    seller = self.catalog_of_sellers[s]
 
-        for j in range(len(self.catalog_of_buyers)):
-            buyer = self.catalog_of_buyers[j]
-            for s in range(len(self.catalog_of_sellers)):
-                seller = self.catalog_of_sellers[s]
-
-                if seller.c == 0: # early exit if seller has no water for code efficiency
-                    continue
-
-                # check reg enviro conditions
-                if self.upstream_selling == False:
-                    if self.reg_enviro(seller.trib_vector, buyer.trib_vector) == False:
+                    if seller.c == 0: # early exit if seller has no water for code efficiency
                         continue
+
+                    # check reg enviro conditions
+                    if self.upstream_selling == False:
+                        if self.reg_enviro(seller.trib_vector, buyer.trib_vector) == False:
+                            continue
+                        
                     
-                  
 
-                x = min(seller.c, buyer.cbar - buyer.c)
+                    x = min(seller.c, buyer.cbar - buyer.c)
 
-                avBr_1 = buyer.alpha - buyer.beta * buyer.c
-                avBr = buyer.alpha - buyer.beta * (buyer.c + x)
-                wtp = avBr_1 + avBr - buyer.alpha # per unit wtp
-                bid = wtp * (1 - self.gamma*(1-self.P))* buyer.non_pec_pref 
-                # (1-self.P) is curtailment rate
-                
-                
-                avSr_1 = seller.alpha - seller.beta * seller.c
-                avSr = seller.alpha - seller.beta * (seller.c - x)
-                wta = avSr_1 + avSr - seller.alpha # per unit wta
-                ask = wta * (1 + self.gamma*(1-self.P)) * seller.non_pec_pref
-                # (1-self.P)is curtailment rate
-
-                
-                if bid > ask:
-                    buyer.c += x
-                    seller.c -= x
+                    avBr_1 = buyer.alpha - buyer.beta * buyer.c
+                    avBr = buyer.alpha - buyer.beta * (buyer.c + x)
+                    wtp = avBr_1 + avBr - buyer.alpha # per unit wtp
+                    bid = wtp * (1 - self.gamma*(1-self.P))* buyer.non_pec_pref 
+                    # (1-self.P) is curtailment rate
                     
-                    if x > 0:
-                        price = ((bid + ask) / 2) #### price  of one unit transferred
-                        price_collection_array.append(price)
-                else:
-                    continue
+                    
+                    avSr_1 = seller.alpha - seller.beta * seller.c
+                    avSr = seller.alpha - seller.beta * (seller.c - x)
+                    wta = avSr_1 + avSr - seller.alpha # per unit wta
+                    ask = wta * (1 + self.gamma*(1-self.P)) * seller.non_pec_pref
+                    # (1-self.P)is curtailment rate
+
+                    
+                    if bid > ask:
+                        buyer.c += x
+                        seller.c -= x
+                        
+                        if x > 0:
+                            price = ((bid + ask) / 2) #### price  of one unit transferred
+                            price_collection_array.append(price)
+                    else:
+                        continue
+        if self.allocation_rule == "proportional":
+            sellers = list(self.catalog_of_sellers)
+            buyers  = list(reversed(self.catalog_of_sellers))
+
+        # proportion based allocation trade sequence
+            for b in range(len(buyers)):
+                for s in range(len(sellers)):
+                    seller = sellers[s]
+                    buyer  = buyers[b]  # match by index for proportional allocation
+                    if s >= b:
+                        break
+
+
+                    if seller.c == 0: # early exit if seller has no water for code efficiency
+                        continue
+
+                    # check reg enviro conditions
+                    if self.upstream_selling == False:
+                        if self.reg_enviro(seller.trib_vector, buyer.trib_vector) == False:
+                            continue
+                        
+                    
+
+                    x = min(seller.c, buyer.cbar - buyer.c)
+
+                    avBr_1 = buyer.alpha - buyer.beta * buyer.c
+                    avBr = buyer.alpha - buyer.beta * (buyer.c + x)
+                    wtp = avBr_1 + avBr - buyer.alpha # per unit wtp
+                    bid = wtp * (1 - self.gamma*(1-self.P))* buyer.non_pec_pref 
+                    # (1-self.P) is curtailment rate
+                    
+                    
+                    avSr_1 = seller.alpha - seller.beta * seller.c
+                    avSr = seller.alpha - seller.beta * (seller.c - x)
+                    wta = avSr_1 + avSr - seller.alpha # per unit wta
+                    ask = wta * (1 + self.gamma*(1-self.P)) * seller.non_pec_pref
+                    # (1-self.P)is curtailment rate
+
+                    
+                    if bid > ask:
+                        buyer.c += x
+                        seller.c -= x
+                        
+                        if x > 0:
+                            price = ((bid + ask) / 2) #### price  of one unit transferred
+                            price_collection_array.append(price)
+                    else:
+                        continue
+
+
+
+
 
         # Total value after trading
         TV1 = np.sum([agent.c * (agent.alpha - agent.beta * agent.c) for agent in self.schedule.agents])
@@ -258,6 +340,35 @@ class TradingModel(Model):
                 if file.tell() == 0:  # If the file is empty, write the headers
                     writer.writerow(['P', 'mean_price', 'min_price', 'max_price', '25th_percentile_price', '75th_percentile_price'])
                 writer.writerow([self.P, mean_price, min_price, max_price, percentile_25_price, percentile_75_price])
+
+
+                
+        # save final allocation vector to csv for proportional allocation rule
+        # save final allocation vector + stats to csv for proportional allocation rule (SM + proportional)
+        if self.smart_market_ind == True and self.allocation_rule == "proportional":
+            file_exists = os.path.isfile(f"{output_dir}/final_allocation_vector_SM_proportional_P{self.P}.csv")
+            is_empty = os.path.getsize(f"{output_dir}/final_allocation_vector_SM_proportional_P{self.P}.csv") == 0 if file_exists else True
+  
+
+            # 2) num trading agents (same structure as SM/BI, but separate file)
+            with open(f"{output_dir}/num_trading_agents_SM_proportional.csv", mode="a", newline="") as file:
+                writer = csv.writer(file)
+                if file.tell() == 0:
+                    writer.writerow(["P", "num_trading_agents_SM_proportional"])
+                writer.writerow([self.P, int(num_trading_agents)])
+
+            # 3) price stats (same structure as SM/BI, but separate file)
+            with open(f"{output_dir}/price_collection_array_SM_proportional.csv", mode="a", newline="") as file:
+                writer = csv.writer(file)
+                if file.tell() == 0:
+                    writer.writerow(["P", "mean_price", "min_price", "max_price",
+                                    "25th_percentile_price", "75th_percentile_price"])
+                writer.writerow([self.P, mean_price, min_price, max_price,
+                                percentile_25_price, percentile_75_price])
+
+
+            
+            
         
         # creat number agents trading array
         if self.bilateral_market_ind == True:
@@ -279,6 +390,9 @@ class TradingModel(Model):
                 if file.tell() == 0:
                     writer.writerow(['P', 'mean_price', 'min_price', 'max_price', '25th_percentile_price', '75th_percentile_price'])
                 writer.writerow([self.P, mean_price, min_price, max_price, percentile_25_price, percentile_75_price])
+
+
+        
                     
     ##################################################################################################################################
     ##################################################################################################################################

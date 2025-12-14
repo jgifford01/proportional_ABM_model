@@ -16,13 +16,13 @@ import csv
 #################################################
 
 
-K = 100 # Number of iterations for each P: K=100 as presented in paper
-N = 500 # Number of agents: 500 as presented in paper
+K = 1 # Number of iterations for each P: K=100 as presented in paper
+N = 200 # Number of agents: 500 as presented in paper
 sigma_complexity = 4 # stream complexity or watershed max dimension  (D1,D2,D3,4,D5,D6,D7,D8,D9,D10)
 gamma = 0 # 0 as presented in paper
 aw = 1 # we are currently setting acreage to one (non random)
 random_seed =  3145 #  3145 for N=500 K=100 
-cores_num = 60 # Number of cores to use for parallel processing/single threading
+cores_num = 4 # Number of cores to use for parallel processing/single threading
 
 # x x x x x x x x x x x x x x x x x x x x x x x x
 # x x x x x x x x x x x x x x x x x x x x x x x x
@@ -32,7 +32,7 @@ stream_complexity = sigma_complexity - 1
 betaw = 1 
 non_pec_prefs_ind = 0 #####  0 => pmax ||or|| 2 => Seniors prefer farming (10.0 to 0.1) !!!!||or|| 1 => Uniform Random won't need!!!
 cbar0 = 1 
-GFT_final_array = np.full((3, 101, K), np.nan) # Array for storing the gains from trade results, initialized with NaN
+GFT_final_array = np.full((4, 101, K), np.nan) # Array for storing the gains from trade results, initialized with NaN
 # x x x x x x x x x x x x x x x x x x x x x x x x 
 # x x x x x x x x x x x x x x x x x x x x x x x x
 
@@ -52,7 +52,7 @@ def cpp_and_sm_simulation(i):
     model1 = TradingModel(N=N, aw=aw, alphaw=alphaw, betaw=betaw, cbar0=cbar0, gamma=gamma,
                             P=P, stream_complexity=stream_complexity, upstream_selling=False,
                             smart_market_ind=False, bilateral_market_ind=False, 
-                            CPP_ind=True, random_seed=random_seed, non_pec_prefs_ind=non_pec_prefs_ind) 
+                            CPP_ind=True, random_seed=random_seed, non_pec_prefs_ind=non_pec_prefs_ind, allocation_rule="priority") 
     model1.central_planner_problem()
     GFT_cpp = model1.GFT
 
@@ -61,11 +61,24 @@ def cpp_and_sm_simulation(i):
     model2 = TradingModel(N=N, aw=aw, alphaw=alphaw, betaw=betaw, cbar0=cbar0, gamma=gamma,
                             P=P, stream_complexity=stream_complexity, upstream_selling=False,
                             smart_market_ind=True, bilateral_market_ind=False, 
-                            CPP_ind=False, random_seed=random_seed, non_pec_prefs_ind=non_pec_prefs_ind)
+                            CPP_ind=False, random_seed=random_seed, non_pec_prefs_ind=non_pec_prefs_ind, allocation_rule="priority")
     model2.trade_sequence()
     GFT_sm = model2.GFT
 
     return i, GFT_cpp, GFT_sm
+
+
+def sm_proportional_simulation(i):
+    P = i / 100
+    modelp = TradingModel(
+        N=N, aw=aw, alphaw=alphaw, betaw=betaw, cbar0=cbar0, gamma=gamma,
+        P=P, stream_complexity=stream_complexity, upstream_selling=False,
+        smart_market_ind=True, bilateral_market_ind=False, CPP_ind=False,
+        random_seed=random_seed, non_pec_prefs_ind=non_pec_prefs_ind,
+        allocation_rule="proportional"
+    )
+    modelp.trade_sequence()
+    return i, modelp.GFT
 
 
 # Main program execution
@@ -96,6 +109,14 @@ if __name__ == '__main__':
             GFT_final_array[1, i, 0] = GFT_sm
         
         print(f"Finished CPP and SM simulations")
+    
+    with ProcessPoolExecutor(max_workers=num_cores) as executor:
+        futures = [executor.submit(sm_proportional_simulation, i) for i in range(101)]
+        for future in as_completed(futures):
+            i, GFT_sm_prop = future.result()
+            GFT_final_array[3, i, 0] = GFT_sm_prop
+        print("Finished SM proportional simulations")
+
 
     # Timing the end
     end_time = time.time()
@@ -120,7 +141,7 @@ if __name__ == '__main__':
     # Save GFT final mean array to a csv file with labels
     with open(f'data/{N}agents_seed{random_seed}/GFT_final_mean_array.csv', 'w', newline='') as file:
         writer = csv.writer(file)
-        writer.writerow(["Central Planning Mean", "Smart Market Mean ", "Bilateral Market Mean"])
+        writer.writerow(["Central Planning Mean", "Smart Market Mean ", "Bilateral Market Mean", "Smart Market Proportional Mean"])
         writer.writerows(GFT_final_mean_array_k.T)   
         
     # Save GFT range array to a csv file with labels

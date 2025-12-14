@@ -5,282 +5,271 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.ticker as mticker
 
-# Ensure Seaborn's aesthetics are applied
+# --------------------------- Style ---------------------------
 sns.set(style="whitegrid")
-fontlabelsize= 10
+fontlabelsize = 10
 linewidth = 1.5
+
 # --------------------------- Step 1: Define Parameters and File Paths ---------------------------
+agent_number = 200
+random_seed = 3145
 
-# Define your agent number and random seed
-agent_number = 500     # Replace with your actual agent number
-random_seed = 3145         # Replace with your actual random seed
-
-# Define directories
 data_dir = f"data/{agent_number}agents_seed{random_seed}"
 plots_dir = f"plots/{agent_number}agents_seed{random_seed}"
-
-# Create the plots directory if it doesn't exist
 os.makedirs(plots_dir, exist_ok=True)
+
+# --------------------------- Helpers ---------------------------
+def _to_numeric(df, cols):
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+def read_tv0_collapsed(path):
+    """
+    Read watervalue-style file (P, TV0), coerce numeric, collapse duplicates by mean TV0 for each P.
+    """
+    df = pd.read_csv(path)
+    df.columns = [c.strip() for c in df.columns]
+    if not {"P", "TV0"}.issubset(df.columns):
+        raise ValueError(f"{path} must have columns ['P','TV0']. Found: {list(df.columns)}")
+
+    df = _to_numeric(df, ["P", "TV0"]).dropna(subset=["P", "TV0"])
+    df = df.groupby("P", as_index=False).agg(TV0=("TV0", "mean")).sort_values("P").reset_index(drop=True)
+    return df
+
+def safe_divide(numer, denom):
+    """
+    elementwise division with denom==0 -> NaN (avoids warnings)
+    """
+    numer = np.asarray(numer, dtype=float)
+    denom = np.asarray(denom, dtype=float)
+    out = np.full_like(numer, np.nan, dtype=float)
+    mask = denom != 0
+    out[mask] = numer[mask] / denom[mask]
+    return out
+
+def collapse_trading(path, count_col):
+    """
+    Read trading file (P, count_col), coerce numeric, collapse duplicates by mean per P.
+    """
+    df = pd.read_csv(path)
+    df.columns = [c.strip() for c in df.columns]
+    if not {"P", count_col}.issubset(df.columns):
+        raise ValueError(f"{path} must have columns ['P','{count_col}']. Found: {list(df.columns)}")
+
+    df = _to_numeric(df, ["P", count_col]).dropna(subset=["P", count_col])
+    df = df.groupby("P", as_index=False).agg(**{count_col: (count_col, "mean")}).sort_values("P").reset_index(drop=True)
+    return df
+
+def align_to_grid(dfP, dfY, P_grid):
+    """
+    Nearest-neighbor alignment of (dfP, dfY) to P_grid.
+    """
+    P_src = np.asarray(dfP, dtype=float)
+    Y_src = np.asarray(dfY, dtype=float)
+    idx = np.abs(P_src[:, None] - P_grid[None, :]).argmin(axis=0)
+    return Y_src[idx]
 
 # --------------------------- Step 2: Load and Process Data ---------------------------
 
-# --- Plot 1: Gains from Trade (GFT) Plot ---
+# ---- 2.1 Load GFT mean outputs (headered) ----
+gft_path = os.path.join(data_dir, "GFT_final_mean_array.csv")
+gft_df = pd.read_csv(gft_path)
+gft_df.columns = [c.strip() for c in gft_df.columns]
 
-# Load GFT final mean array and BI range array for Plot 1
-GFT_final_mean_df_plot1 = pd.read_csv(os.path.join(data_dir, "GFT_final_mean_array.csv"))
-GFT_final_mean_array_plot1 = GFT_final_mean_df_plot1.to_numpy().T  # Transpose as per original code
+required = [
+    "Central Planning Mean",
+    "Smart Market Mean",
+    "Smart Market Proportional Mean",
+]
+missing = [c for c in required if c not in gft_df.columns]
+if missing:
+    raise ValueError(f"Missing columns in {gft_path}: {missing}\nFound: {list(gft_df.columns)}")
 
-BI_range_df_plot1 = pd.read_csv(os.path.join(data_dir, "BI_range_array.csv"))
-BI_range_array_plot1 = BI_range_df_plot1.to_numpy()
+gft_df = _to_numeric(gft_df, required)
 
-GFT_bi_range_arraymax_plot1 = BI_range_array_plot1[:, 1]
-GFT_bi_range_arraymin_plot1 = BI_range_array_plot1[:, 0]
+GFT_cp  = gft_df["Central Planning Mean"].to_numpy(dtype=float)
+GFT_sm  = gft_df["Smart Market Mean"].to_numpy(dtype=float)
+GFT_smp = gft_df["Smart Market Proportional Mean"].to_numpy(dtype=float)
 
-# Define Proration rate from 0 to 1
-# Assuming there are 101 points corresponding to PP_reversed_plot1 from 100 to 0
-proration_rate_plot1 = np.linspace(0, 1, len(GFT_final_mean_array_plot1[0, :]))
+n = len(GFT_cp)
+P_grid = np.linspace(0, 1, n)
 
-# --- Plot 2: GFT/TV0 Plot ---
+# ---- 2.2 Load pre-trade values (collapse duplicates) ----
+wv_path = os.path.join(data_dir, "watervalue.csv")
+wv_prop_path = os.path.join(data_dir, "watervalue_SM_proportional.csv")
 
-# Load GFT final mean array for Plot 2 (reload to avoid duplication issues
+wv = read_tv0_collapsed(wv_path)
+wv_prop = read_tv0_collapsed(wv_prop_path)
 
-GFT_final_mean_df_plot2 = pd.read_csv(os.path.join(data_dir, "GFT_final_mean_array.csv"))
-GFT_final_mean_array_plot2 = GFT_final_mean_df_plot2.to_numpy()
+TV0 = align_to_grid(wv["P"].to_numpy(), wv["TV0"].to_numpy(), P_grid)
+TV0_prop = align_to_grid(wv_prop["P"].to_numpy(), wv_prop["TV0"].to_numpy(), P_grid)
 
-# Load water value data
-water_value_df_plot2 = pd.read_csv(os.path.join(data_dir, "watervalue.csv"))
-water_value_df_plot2 = water_value_df_plot2.sort_values(by=water_value_df_plot2.columns[0])
-water_value_no_trade_plot2 = water_value_df_plot2.to_numpy()
+# Benchmark for normalization: pre-trade value at full availability (δ=1)
+TVP1 = TV0[-1]
 
-# Calculate GFT/TV0 values
-GFT_bilat_TV0_plot2 = GFT_final_mean_array_plot2[:, 2] / water_value_no_trade_plot2[:, 1]
-GFT_smart_TV0_plot2 = GFT_final_mean_array_plot2[:, 1] / water_value_no_trade_plot2[:, 1]
-GFT_cent_TV0_plot2 = GFT_final_mean_array_plot2[:, 0] / water_value_no_trade_plot2[:, 1]
+# ---- 2.3 Compute ratios (safe against TV0==0) ----
+GFT_cp_over_TVP1  = safe_divide(GFT_cp,  TVP1)
+GFT_sm_over_TVP1  = safe_divide(GFT_sm,  TVP1)
+GFT_smp_over_TVP1 = safe_divide(GFT_smp, TVP1)
 
-# Calculate range for fill_between
-range_min_TVO_plot2 = GFT_bi_range_arraymin_plot1 / water_value_no_trade_plot2[:, 1]
-range_max_TVO_plot2 = GFT_bi_range_arraymax_plot1 / water_value_no_trade_plot2[:, 1]
+GFT_cp_over_TV0   = safe_divide(GFT_cp,  TV0)
+GFT_sm_over_TV0   = safe_divide(GFT_sm,  TV0)
+GFT_smp_over_TV0  = safe_divide(GFT_smp, TV0_prop)
 
-# --- Plot 3: Number of Agents Trading Over Usable Rights ---
+# ---- 2.4 Trading counts (collapse duplicates) ----
+cp_trade_path = os.path.join(data_dir, "num_trading_agents_CPP.csv")
+sm_trade_path = os.path.join(data_dir, "num_trading_agents_SM.csv")
+smp_trade_path = os.path.join(data_dir, "num_trading_agents_SM_proportional.csv")
 
-# Load bilateral agent trading data
-num_trading_agents_bi_df_plot3 = pd.read_csv(os.path.join(data_dir, "num_trading_agents_BI.csv"))
+cp_trade = collapse_trading(cp_trade_path, "num_trading_agents_CPP")
+sm_trade = collapse_trading(sm_trade_path, "num_trading_agents_SM")
+smp_trade = collapse_trading(smp_trade_path, "num_trading_agents_SM_proportional")
 
-# Group by 'P' and calculate mean, min, max for 'num_trading_agents_BM'
-num_trading_agents_summary_plot3 = num_trading_agents_bi_df_plot3.groupby('P').agg(
-    mean_num_agents=('num_trading_agents_BM', 'mean'),
-    min_num_agents=('num_trading_agents_BM', 'min'),
-    max_num_agents=('num_trading_agents_BM', 'max')
-).reset_index()
+cp_frac = align_to_grid(cp_trade["P"].to_numpy(), cp_trade["num_trading_agents_CPP"].to_numpy(), P_grid) / agent_number
+sm_frac = align_to_grid(sm_trade["P"].to_numpy(), sm_trade["num_trading_agents_SM"].to_numpy(), P_grid) / agent_number
+smp_frac = align_to_grid(smp_trade["P"].to_numpy(), smp_trade["num_trading_agents_SM_proportional"].to_numpy(), P_grid) / agent_number
 
-# Load Smart Market agent trading data
-num_trading_agents_SM_df_plot3 = pd.read_csv(os.path.join(data_dir, "num_trading_agents_SM.csv"))
-num_trading_agents_SM_plot3 = num_trading_agents_SM_df_plot3.sort_values(by='P')
+# ---- 2.5 Final value (post-trade): TV1 = TV0 + GFT ----
+TV1_cp = TV0 + GFT_cp
+TV1_sm = TV0 + GFT_sm
+TV1_smp = TV0_prop + GFT_smp
 
-# load central planning data
-num_trading_agents_CP_df_plot3 = pd.read_csv(os.path.join(data_dir, "num_trading_agents_CPP.csv"))
-num_trading_agents_CP_plot3 = num_trading_agents_CP_df_plot3.sort_values(by='P')    
+# --------------------------- NORMALIZE right two panels by TV0(δ=1) ---------------------------
+TV0_norm = safe_divide(TV0, TVP1)
+TV0_prop_norm = safe_divide(TV0_prop, TVP1)
 
-# --------------------------- Step 3: Create Combined Figure ---------------------------
+TV1_cp_norm = safe_divide(TV1_cp, TVP1)
+TV1_sm_norm = safe_divide(TV1_sm, TVP1)
+TV1_smp_norm = safe_divide(TV1_smp, TVP1)
 
-# Create a figure with 1 row and 3 columns
-fig, axes = plt.subplots(1, 3, figsize=(6.5, 2.8),constrained_layout=True)  # Adjust figsize as needed
+# --------------------------- Step 3: Create Combined Figure (1x5) ---------------------------
+fig, axes = plt.subplots(1, 5, figsize=(10.6, 2.8), constrained_layout=True)
 
-# --------------------------- Plot 1: Gains from Trade (GFT) Plot ---------------------------
+# Canonical legend labels/colors you want everywhere
+label_map = {
+    "CPP": {"color": "#A0A09F"},
+    "SM": {"color": "#F6DB8C"},
+    "SM proportional": {"color": "#4C70D4"},
+    "CPP/SM": {"color": "#4D4D4D"},
+}
 
+# --------------------------- Panel 1: GFT / TV(δ=1) ---------------------------
 ax1 = axes[0]
+sns.lineplot(x=P_grid, y=GFT_cp_over_TVP1,  label="CPP",            color=label_map["CPP"]["color"], ax=ax1, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=GFT_sm_over_TVP1,  label="SM",             color=label_map["SM"]["color"], ax=ax1, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=GFT_smp_over_TVP1, label="SM proportional", color=label_map["SM proportional"]["color"], ax=ax1, legend=False, linewidth=linewidth)
 
-# find total value at p=1
-TVP1 = water_value_no_trade_plot2[-1, 1]
-
-
-""" Full value
-# Plot the three market types
-sns.lineplot(x=proration_rate_plot1, y=GFT_final_mean_array_plot1[0, :],
-             label="Full information", color='#A0A09F', ax=ax1, legend=False,linewidth=linewidth)
-sns.lineplot(x=proration_rate_plot1, y=GFT_final_mean_array_plot1[1, :],
-             label="Smart market", color='#F6DB8C', ax=ax1, legend=False,linewidth=linewidth)
-sns.lineplot(x=proration_rate_plot1, y=GFT_final_mean_array_plot1[2, :],
-             label="Bilateral market", color='#8CD8C0', ax=ax1, legend=False,linewidth=linewidth)
-
-# Fill between for range
-ax1.fill_between(proration_rate_plot1, GFT_bi_range_arraymin_plot1, GFT_bi_range_arraymax_plot1,
-                 color='#E6F6F1', alpha=0.8, label="Bilateral range")  #
-"""
-# GFT lines divided by TVP1
-# Plot the three market types
-sns.lineplot(x=proration_rate_plot1, y=GFT_final_mean_array_plot1[0, :]/TVP1,
-             label="Full information", color='#A0A09F', ax=ax1, legend=False,linewidth=linewidth)
-sns.lineplot(x=proration_rate_plot1, y=GFT_final_mean_array_plot1[1, :]/TVP1,
-                label="Smart market", color='#F6DB8C', ax=ax1, legend=False,linewidth=linewidth)
-sns.lineplot(x=proration_rate_plot1, y=GFT_final_mean_array_plot1[2, :]/TVP1,
-                label="Bilateral market", color='#8CD8C0', ax=ax1, legend=False,linewidth=linewidth)
-
-# Fill between for range
-ax1.fill_between(proration_rate_plot1, GFT_bi_range_arraymin_plot1/TVP1, GFT_bi_range_arraymax_plot1/TVP1,
-                    color='#E6F6F1', alpha=0.8, label="Bilateral range")  #
-
-# Customize axes
-#ax1.set_xlabel("Proration rate", color='black', fontsize=10)
-#ax1.set_ylabel("Gains from Trade", color='black', fontsize=10)
-ax1.tick_params(axis='y', labelcolor='black')
-ax1.set_ylim(0, )
-
-# Set x-axis from 0 to 1 without percentage labels
 ax1.set_xlim(0, 1)
 ax1.set_xticks(np.linspace(0, 1, num=6))
-ax1.set_xticklabels([f"{x:.1f}" for x in ax1.get_xticks()], fontsize=fontlabelsize)  # Labels as decimal
-ax1.set_xlabel("Water availability index (δ)", color='black', fontsize=fontlabelsize)
+ax1.set_xticklabels([f"{x:.1f}" for x in ax1.get_xticks()], fontsize=fontlabelsize)
+ax1.tick_params(axis="y", labelsize=fontlabelsize, pad=0)
+ax1.set_xlabel("Water availability index (δ)", color="black", fontsize=fontlabelsize)
+ax1.set_title("GFT / TV0(δ=1)", fontsize=fontlabelsize)
+ax1.grid(True, color="lightgray", linestyle="-", linewidth=0.5)
 
-
-# set y-axis labels fontsize
-ax1.tick_params(axis='y', labelsize=fontlabelsize)
-#ax1.set_yticks(np.linspace(0, 350, num=6))
-#ax1.set_yticks(np.linspace(0, 3200, num=20))
-
-# plot title
-ax1.set_title("GFT over pre-trade value | δ=1", fontsize=fontlabelsize)
-
-# --------------------------- Plot 2: GFT/TV0 Plot ---------------------------
-
+# --------------------------- Panel 2: GFT / TV0(δ) ---------------------------
 ax2 = axes[1]
+sns.lineplot(x=P_grid, y=GFT_cp_over_TV0,  label="CPP",            color=label_map["CPP"]["color"], ax=ax2, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=GFT_sm_over_TV0,  label="SM",             color=label_map["SM"]["color"], ax=ax2, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=GFT_smp_over_TV0, label="SM proportional", color=label_map["SM proportional"]["color"], ax=ax2, legend=False, linewidth=linewidth)
 
-# Plot the three market types
-sns.lineplot(x=water_value_no_trade_plot2[:, 0], y=GFT_cent_TV0_plot2,
-             label="Central Planning", color='#A0A09F', ax=ax2, legend=False, linewidth=linewidth)
-sns.lineplot(x=water_value_no_trade_plot2[:, 0], y=GFT_smart_TV0_plot2,
-             label="Smart Market", color='#F6DB8C', ax=ax2, legend=False, linewidth=linewidth)
-sns.lineplot(x=water_value_no_trade_plot2[:, 0], y=GFT_bilat_TV0_plot2,
-             label="Bilateral Market", color='#8CD8C0', ax=ax2, legend=False, linewidth=linewidth)
-
-# Fill between for range
-ax2.fill_between(water_value_no_trade_plot2[:, 0], range_min_TVO_plot2, range_max_TVO_plot2,
-                 color='#E6F6F1', alpha=0.8, label="_nolegend_")
-
-# Customize axes
-ax2.set_xlabel("Water availability index (δ)", color='black', fontsize=fontlabelsize)
-#ax2.set_ylabel("GFT/TV0", color='black', fontsize=10)
-ax2.tick_params(axis='y', labelcolor='black')
-ax2.set_ylim(0,  )
 ax2.set_xlim(0, 1)
-
-# Set x-axis from 0 to 1 without percentage labels
 ax2.set_xticks(np.linspace(0, 1, num=6))
-ax2.set_xticklabels([f"{x:.1f}" for x in ax2.get_xticks()], fontsize=fontlabelsize)  # Labels as decimal
-
-# set y-axis labels fontsize
-ax2.tick_params(axis='y', labelsize=fontlabelsize)
-# Set y-axis ticks to have 1 decimal place
-ax2.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))
+ax2.set_xticklabels([f"{x:.1f}" for x in ax2.get_xticks()], fontsize=fontlabelsize)
+ax2.tick_params(axis="y", labelsize=fontlabelsize, pad=0)
+ax2.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
 ax2.set_yticks(np.linspace(0, 2, num=6))
+ax2.set_xlabel("Water availability index (δ)", color="black", fontsize=fontlabelsize)
+ax2.set_title("GFT / TV0(δ)", fontsize=fontlabelsize)
+ax2.grid(True, color="lightgray", linestyle="-", linewidth=0.5)
 
-# add plot title
-ax2.set_title("GFT over pre-trade value | δ", fontsize=fontlabelsize)
-
-# --------------------------- Plot 3: Number of Agents Trading Over Usable Rights ---------------------------
-
+# --------------------------- Panel 3: Fraction trading ---------------------------
 ax3 = axes[2]
+sns.lineplot(x=P_grid, y=cp_frac,  label="CPP",            color=label_map["CPP"]["color"], ax=ax3, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=sm_frac,  label="SM",             color=label_map["SM"]["color"], ax=ax3, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=smp_frac, label="SM proportional", color=label_map["SM proportional"]["color"], ax=ax3, legend=False, linewidth=linewidth)
 
-# Plot Bilateral Market mean
-sns.lineplot(x=num_trading_agents_summary_plot3['P'],
-             y=num_trading_agents_summary_plot3['mean_num_agents'] / agent_number,
-             label="Bilateral Market", color='#8CD8C0', ax=ax3, legend=False,linewidth=linewidth)
-
-# Fill between for Bilateral Market min and max
-ax3.fill_between(num_trading_agents_summary_plot3['P'],
-                num_trading_agents_summary_plot3['min_num_agents'] / agent_number,
-                num_trading_agents_summary_plot3['max_num_agents'] / agent_number,
-                color='#E6F6F1', alpha=0.8, label="Bilateral Range")
-
-# Plot Smart Market
-sns.lineplot(x=num_trading_agents_SM_plot3['P'],
-             y=num_trading_agents_SM_plot3['num_trading_agents_SM'] / agent_number,
-             label="Smart Market", color='#F6DB8C', ax=ax3, legend=False,linewidth=linewidth)
-
-# Plot Central Planning line
-sns.lineplot(x=num_trading_agents_CP_plot3['P'],
-                y=num_trading_agents_CP_plot3['num_trading_agents_CPP'] / agent_number,
-                label="Full information", color='#A0A09F', ax=ax3, legend=False,linewidth=linewidth)
-
-# Customize axes
-ax3.set_xlabel(" ", color='black', fontsize=fontlabelsize)
-ax3.set_ylabel(" ", color='black', fontsize=fontlabelsize)
-ax3.tick_params(axis='y', labelcolor='black')
-ax3.set_ylim(0, 1.2)
 ax3.set_xlim(0, 1)
-
-# Set x-axis from 0 to 1 without percentage labels
+ax3.set_ylim(0, 1.2)
 ax3.set_xticks(np.linspace(0, 1, num=6))
-ax3.set_xticklabels([f"{x:.1f}" for x in ax3.get_xticks()], fontsize=fontlabelsize)  # Labels as decimal
-ax3.set_xlabel("Water availability index (δ)", color='black', fontsize=fontlabelsize)
-# set y-axis labels fontsize
-ax3.tick_params(axis='y', labelsize=fontlabelsize)
-
-# add plot title
+ax3.set_xticklabels([f"{x:.1f}" for x in ax3.get_xticks()], fontsize=fontlabelsize)
+ax3.tick_params(axis="y", labelsize=fontlabelsize, pad=0)
+ax3.set_xlabel("Water availability index (δ)", color="black", fontsize=fontlabelsize)
 ax3.set_title("Fraction of agents trading", fontsize=fontlabelsize)
+ax3.grid(True, color="lightgray", linestyle="-", linewidth=0.5)
 
-# --------------------------- Step 4: Create Shared Legend ---------------------------
+# --------------------------- Panel 4: Pre-trade value | δ (normalized) ---------------------------
+ax4 = axes[3]
+sns.lineplot(x=P_grid, y=TV0_norm,      label="CPP/SM",           color=label_map["CPP/SM"]["color"], ax=ax4, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=TV0_prop_norm, label="SM proportional",  color=label_map["SM proportional"]["color"], ax=ax4, legend=False, linewidth=linewidth)
 
-# Collect handles and labels from the first subplot (ax1)
-handles, labels = ax1.get_legend_handles_labels()
+ax4.set_xlim(0, 1)
+ax4.set_xticks(np.linspace(0, 1, num=6))
+ax4.set_xticklabels([f"{x:.1f}" for x in ax4.get_xticks()], fontsize=fontlabelsize)
+ax4.tick_params(axis="y", labelsize=fontlabelsize, pad=0)
+ax4.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+ax4.set_xlabel("Water availability index (δ)", color="black", fontsize=fontlabelsize)
+ax4.set_title("TV0(δ) / TV0(δ=1)", fontsize=fontlabelsize)
+ax4.grid(True, color="lightgray", linestyle="-", linewidth=0.5)
 
+# --------------------------- Panel 5: Final value | δ (normalized) ---------------------------
+ax5 = axes[4]
+sns.lineplot(x=P_grid, y=TV1_cp_norm,  label="CPP",            color=label_map["CPP"]["color"], ax=ax5, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=TV1_sm_norm,  label="SM",             color=label_map["SM"]["color"], ax=ax5, legend=False, linewidth=linewidth)
+sns.lineplot(x=P_grid, y=TV1_smp_norm, label="SM proportional", color=label_map["SM proportional"]["color"], ax=ax5, legend=False, linewidth=linewidth)
 
-# Create a single legend for the entire figure
-fig.legend(handles, labels, loc='lower center', ncol=4, frameon=False, fontsize=fontlabelsize,
-           bbox_to_anchor=(0.5, -0.05))  # Adjust this tuple to control the legend position (x, y)
-           #borderaxespad=-0.35)  # Increase this value to add more padding around the legend
+ax5.set_xlim(0, 1)
+ax5.set_xticks(np.linspace(0, 1, num=6))
+ax5.set_xticklabels([f"{x:.1f}" for x in ax5.get_xticks()], fontsize=fontlabelsize)
+ax5.tick_params(axis="y", labelsize=fontlabelsize, pad=0)
+ax5.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+ax5.set_xlabel("Water availability index (δ)", color="black", fontsize=fontlabelsize)
+ax5.set_title("TV1(δ) / TV0(δ=1)", fontsize=fontlabelsize)
+ax5.grid(True, color="lightgray", linestyle="-", linewidth=0.5)
 
+# --------------------------- Shared Legend (ONLY: CPP, SM, SM proportional, CPP/SM) ---------------------------
+want = ["CPP", "SM", "SM proportional", "CPP/SM"]
+handle_by_label = {}
 
-
-
-
-# --------------------------- Step 5: extra things ---------------------------
-# Disable grid for each subplot
-
-# Plot 1: Gains from Trade (GFT) Plot
-ax1.grid(True, color='lightgray', linestyle='-', linewidth=0.5)
-
-# Plot 2: GFT/TV0 Plot
-ax2.grid(True, color='lightgray', linestyle='-', linewidth=0.5)
-
-# Plot 3: Number of Agents Trading Over Usable Rights
-ax3.grid(True, color='lightgray', linestyle='-', linewidth=0.5)
-
-
-# make grid very faint
-
-# Loop through each subplot axis and customize the spines
 for ax in axes:
-    # Customize all 4 spines (top, bottom, left, right)
+    h, l = ax.get_legend_handles_labels()
+    for hh, ll in zip(h, l):
+        if ll in want and ll not in handle_by_label:
+            handle_by_label[ll] = hh
+
+handles = [handle_by_label[k] for k in want if k in handle_by_label]
+labels  = [k for k in want if k in handle_by_label]
+
+fig.legend(
+    handles, labels,
+    loc="lower center",
+    ncol=4,
+    frameon=False,
+    fontsize=fontlabelsize,
+    bbox_to_anchor=(0.5, -0.20),
+)
+
+# --------------------------- Spines ---------------------------
+for ax in axes:
     for spine in ax.spines.values():
-        spine.set_edgecolor('black')  # Set the color of the bounding box
-        spine.set_linewidth(1.5)      # Set the thickness (boldness) of the bounding box
+        spine.set_edgecolor("black")
+        spine.set_linewidth(1.5)
+    ax.tick_params(axis="y", pad=0)
 
-for ax in axes:
-    ax.tick_params(axis='y', pad=0)  # Adjust y-axis tick label padding for all subplots
-
-
-# --------------------------- Step 5: Final Adjustments and Save ---------------------------
-
-# Adjust layout to prevent overlapping elements
 plt.tight_layout()
 
-plt.subplots_adjust(left = 0.0, right = 1, wspace=0.2)  # Adjust the width space between subplots
+# Give extra room at bottom so legend isn't clipped
+plt.subplots_adjust(left=0.0, right=1, wspace=0.25, bottom=0.28)
 
+# --------------------------- Save ---------------------------
+png_path = os.path.join(plots_dir, "5_panel_CPP_SM_SMP_TV0_TV1_normed.png")
+svg_path = os.path.join(plots_dir, "5_panel_CPP_SM_SMP_TV0_TV1_normed.svg")
+plt.savefig(png_path, dpi=300, bbox_inches="tight")
+plt.savefig(svg_path, format="svg", dpi=1000, bbox_inches="tight")
 
-
-
-# Save the combined figure
-combined_plot_path = os.path.join(plots_dir, "3_panel_facet.png")
-plt.savefig(combined_plot_path, dpi=300, bbox_inches='tight')  # Adjust DPI as needed
-
-
-# save as svg
-plt.savefig(os.path.join(plots_dir, "3_panel_facet.svg"), format='svg', dpi=1000, bbox_inches='tight')  # Adjust DPI as needed
-
-
-# compute mean and max of number of agents trading for the central planner market type
-mean_agents_trading_CP = num_trading_agents_CP_plot3['num_trading_agents_CPP'].mean()/500
-max_agents_trading_CP = num_trading_agents_CP_plot3['num_trading_agents_CPP'].max()/500
-print(f"Mean number of agents trading (Central Planning): {mean_agents_trading_CP}")
-print(f"Max number of agents trading (Central Planning): {max_agents_trading_CP}")
+print(f"Saved: {png_path}")
+print(f"Saved: {svg_path}")
+print(f"Mean fraction trading (CPP): {np.nanmean(cp_frac):.3f}")
+print(f"Max fraction trading (CPP):  {np.nanmax(cp_frac):.3f}")
